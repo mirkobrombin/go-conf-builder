@@ -68,3 +68,76 @@ func TestConfigNameAndPath(t *testing.T) {
 		t.Fatalf("expected port 9000")
 	}
 }
+
+func TestNestedConfigAccess(t *testing.T) {
+	tests := []struct {
+		name    string
+		ext     string
+		content string
+	}{
+		{
+			name:    "json",
+			ext:     ".json",
+			content: `{"database":{"hosts":["db1","db2"],"port":5432}}`,
+		},
+		{
+			name:    "yaml",
+			ext:     ".yaml",
+			content: "database:\n  hosts:\n    - db1\n    - db2\n  port: 5432\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp, err := os.CreateTemp("", "cfg*"+tt.ext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(tmp.Name())
+			if _, err := tmp.WriteString(tt.content); err != nil {
+				t.Fatal(err)
+			}
+			tmp.Close()
+
+			c := New()
+			c.SetConfigFile(tmp.Name())
+			if err := c.ReadInConfig(); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := c.GetString("database.hosts.0"); got != "db1" {
+				t.Fatalf("expected first host db1, got %q", got)
+			}
+			if got := c.GetInt("database.port"); got != 5432 {
+				t.Fatalf("expected port 5432, got %d", got)
+			}
+		})
+	}
+}
+
+func TestNestedEnvOverride(t *testing.T) {
+	tmp, err := os.CreateTemp("", "cfg*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString("database:\n  hosts:\n    - db1\n    - db2\n"); err != nil {
+		t.Fatal(err)
+	}
+	tmp.Close()
+
+	c := New()
+	c.SetEnvPrefix("APP")
+	c.AutomaticEnv()
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	os.Setenv("APP_DATABASE_HOSTS_1", "db-override")
+	defer os.Unsetenv("APP_DATABASE_HOSTS_1")
+
+	if got := c.GetString("database.hosts.1"); got != "db-override" {
+		t.Fatalf("expected env override db-override, got %q", got)
+	}
+}

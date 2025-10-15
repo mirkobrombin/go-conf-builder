@@ -112,7 +112,11 @@ func (c *Config) ReadInConfig() error {
 	default:
 		err = errors.New("unsupported config file type")
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	c.values = normalizeLoadedMap(c.values)
+	return nil
 }
 
 func (c *Config) getEnv(key string) (string, bool) {
@@ -133,14 +137,112 @@ func (c *Config) get(key string) (any, bool) {
 			return v, true
 		}
 	}
-	if v, ok := c.values[key]; ok {
+	if v, ok := fetchValue(c.values, key); ok {
 		return v, true
 	}
 	if v, ok := c.getEnv(key); ok {
 		return v, true
 	}
-	v, ok := c.defaults[key]
-	return v, ok
+	return fetchValue(c.defaults, key)
+}
+
+func fetchValue(data map[string]any, key string) (any, bool) {
+	if data == nil {
+		return nil, false
+	}
+	if v, ok := data[key]; ok {
+		return v, true
+	}
+	parts := strings.Split(key, ".")
+	var current any = data
+	for _, part := range parts {
+		switch node := current.(type) {
+		case map[string]any:
+			var ok bool
+			current, ok = node[part]
+			if !ok {
+				return nil, false
+			}
+		case map[string]string:
+			var ok bool
+			current, ok = node[part]
+			if !ok {
+				return nil, false
+			}
+		case map[any]any:
+			var ok bool
+			current, ok = node[part]
+			if !ok {
+				return nil, false
+			}
+		case []any:
+			idx, err := strconv.Atoi(part)
+			if err != nil || idx < 0 || idx >= len(node) {
+				return nil, false
+			}
+			current = node[idx]
+		case []map[string]any:
+			idx, err := strconv.Atoi(part)
+			if err != nil || idx < 0 || idx >= len(node) {
+				return nil, false
+			}
+			current = node[idx]
+		case []map[interface{}]any:
+			idx, err := strconv.Atoi(part)
+			if err != nil || idx < 0 || idx >= len(node) {
+				return nil, false
+			}
+			current = node[idx]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func normalizeLoadedMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	for k, v := range values {
+		values[k] = normalizeValue(v)
+	}
+	return values
+}
+
+func normalizeValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, item := range v {
+			v[key] = normalizeValue(item)
+		}
+		return v
+	case map[any]any:
+		converted := make(map[string]any, len(v))
+		for key, item := range v {
+			converted[fmt.Sprint(key)] = normalizeValue(item)
+		}
+		return converted
+	case []any:
+		for i, item := range v {
+			v[i] = normalizeValue(item)
+		}
+		return v
+	case []map[string]any:
+		result := make([]any, len(v))
+		for i, item := range v {
+			result[i] = normalizeValue(item)
+		}
+		return result
+	case []map[any]any:
+		result := make([]any, len(v))
+		for i, item := range v {
+			result[i] = normalizeValue(item)
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 // OnConfigChange sets a callback for configuration changes.
