@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultsAndEnv(t *testing.T) {
@@ -227,5 +228,95 @@ func TestMergeSequenceWithMapsAndReaders(t *testing.T) {
 	}
 	if got := c.GetString("extra"); got != "value" {
 		t.Fatalf("expected extra=value, got %q", got)
+	}
+}
+
+func TestGetters(t *testing.T) {
+	c := New()
+	c.MergeConfigMap(map[string]any{
+		"number":   "3.14",
+		"duration": "5s",
+		"strings":  []any{"a", 2, true},
+		"ints":     []any{"1", 2, 3.0},
+		"mapping": map[string]any{
+			"key":  12,
+			"list": []any{"x", "y"},
+		},
+	})
+
+	if got := c.GetFloat64("number"); got != 3.14 {
+		t.Fatalf("expected float64 3.14, got %f", got)
+	}
+	if got := c.GetDuration("duration"); got != 5*time.Second {
+		t.Fatalf("expected duration 5s, got %s", got)
+	}
+	if got := c.GetStringSlice("strings"); len(got) != 3 || got[0] != "a" || got[1] != "2" || got[2] != "true" {
+		t.Fatalf("unexpected string slice %#v", got)
+	}
+	if got := c.GetIntSlice("ints"); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Fatalf("unexpected int slice %#v", got)
+	}
+
+	strMap := c.GetStringMap("mapping")
+	if stringify(strMap["key"]) != "12" {
+		t.Fatalf("expected mapping.key to stringify to 12, got %v", strMap["key"])
+	}
+	mapString := c.GetStringMapString("mapping")
+	if mapString["key"] != "12" {
+		t.Fatalf("expected string map key to be 12, got %q", mapString["key"])
+	}
+	mapSlice := c.GetStringMapStringSlice("mapping")
+	if len(mapSlice["list"]) != 2 || mapSlice["list"][0] != "x" || mapSlice["list"][1] != "y" {
+		t.Fatalf("expected list to be [x y], got %#v", mapSlice["list"])
+	}
+}
+
+type appConfig struct {
+	Server struct {
+		Host    string        `mapstructure:"host"`
+		Port    int           `mapstructure:"port"`
+		Timeout time.Duration `mapstructure:"timeout"`
+	} `mapstructure:"server"`
+	Feature struct {
+		Enabled bool `mapstructure:"enabled"`
+	}
+}
+
+func TestUnmarshal(t *testing.T) {
+	c := New()
+	c.MergeConfigMap(map[string]any{
+		"server": map[string]any{
+			"host":    "localhost",
+			"port":    8080,
+			"timeout": "10s",
+		},
+		"feature": map[string]any{
+			"enabled": true,
+		},
+	})
+
+	var cfg appConfig
+	if err := c.Unmarshal("", &cfg); err != nil {
+		t.Fatalf("unexpected error unmarshalling root: %v", err)
+	}
+	if cfg.Server.Host != "localhost" || cfg.Server.Port != 8080 || cfg.Server.Timeout != 10*time.Second {
+		t.Fatalf("unexpected server config %+v", cfg.Server)
+	}
+	if !cfg.Feature.Enabled {
+		t.Fatalf("expected feature.enabled true")
+	}
+
+	var server struct {
+		Host string `mapstructure:"host"`
+	}
+	if err := c.Unmarshal("server", &server); err != nil {
+		t.Fatalf("unexpected error unmarshalling server: %v", err)
+	}
+	if server.Host != "localhost" {
+		t.Fatalf("expected server host localhost, got %q", server.Host)
+	}
+
+	if err := c.Unmarshal("missing", &server); err == nil {
+		t.Fatalf("expected error for missing key")
 	}
 }

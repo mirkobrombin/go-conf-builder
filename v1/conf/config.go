@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/fsnotify/fsnotify"
+	"github.com/mitchellh/mapstructure"
 	ini "gopkg.in/ini.v1"
 	"gopkg.in/yaml.v3"
 )
@@ -429,6 +431,212 @@ func (c *Config) GetBool(key string) bool {
 	return false
 }
 
+// GetFloat64 returns a float64 value for the key. When the stored value is not
+// compatible with a floating point representation, it falls back to 0.
+func (c *Config) GetFloat64(key string) float64 {
+	if v, ok := c.get(key); ok {
+		switch val := v.(type) {
+		case float64:
+			return val
+		case float32:
+			return float64(val)
+		case int:
+			return float64(val)
+		case int64:
+			return float64(val)
+		case json.Number:
+			f, _ := val.Float64()
+			return f
+		case string:
+			f, _ := strconv.ParseFloat(val, 64)
+			return f
+		}
+	}
+	return 0
+}
+
+// GetDuration returns a time.Duration value for the key. Strings are parsed
+// using time.ParseDuration, numeric values are treated as nanoseconds, and
+// incompatible values yield 0.
+func (c *Config) GetDuration(key string) time.Duration {
+	if v, ok := c.get(key); ok {
+		switch val := v.(type) {
+		case time.Duration:
+			return val
+		case int:
+			return time.Duration(val)
+		case int64:
+			return time.Duration(val)
+		case float64:
+			return time.Duration(val)
+		case string:
+			d, err := time.ParseDuration(val)
+			if err == nil {
+				return d
+			}
+		}
+	}
+	return 0
+}
+
+// GetStringSlice returns a []string value for the key. Non compatible values
+// result in an empty slice.
+func (c *Config) GetStringSlice(key string) []string {
+	if v, ok := c.get(key); ok {
+		if res := toStringSlice(v); res != nil {
+			return res
+		}
+	}
+	return []string{}
+}
+
+// GetIntSlice returns a []int value for the key. Non convertible values result
+// in an empty slice.
+func (c *Config) GetIntSlice(key string) []int {
+	if v, ok := c.get(key); ok {
+		switch slice := v.(type) {
+		case []int:
+			return append([]int(nil), slice...)
+		case []any:
+			result := make([]int, 0, len(slice))
+			for _, item := range slice {
+				switch val := item.(type) {
+				case int:
+					result = append(result, val)
+				case int64:
+					result = append(result, int(val))
+				case float64:
+					result = append(result, int(val))
+				case string:
+					i, err := strconv.Atoi(val)
+					if err != nil {
+						return []int{}
+					}
+					result = append(result, i)
+				default:
+					return []int{}
+				}
+			}
+			return result
+		}
+	}
+	return []int{}
+}
+
+// GetStringMap returns a map[string]any value for the key. When the value is
+// not a compatible map, it returns an empty map.
+func (c *Config) GetStringMap(key string) map[string]any {
+	if v, ok := c.get(key); ok {
+		switch val := v.(type) {
+		case map[string]any:
+			return cloneMap(val)
+		case map[string]string:
+			res := make(map[string]any, len(val))
+			for k, item := range val {
+				res[k] = item
+			}
+			return res
+		case map[any]any:
+			res := make(map[string]any, len(val))
+			for k, item := range val {
+				res[fmt.Sprint(k)] = item
+			}
+			return res
+		}
+	}
+	return map[string]any{}
+}
+
+// GetStringMapString returns a map[string]string value for the key. On
+// incompatible types, it returns an empty map.
+func (c *Config) GetStringMapString(key string) map[string]string {
+	if v, ok := c.get(key); ok {
+		switch val := v.(type) {
+		case map[string]string:
+			copy := make(map[string]string, len(val))
+			for k, item := range val {
+				copy[k] = item
+			}
+			return copy
+		case map[string]any:
+			res := make(map[string]string, len(val))
+			for k, item := range val {
+				res[k] = stringify(item)
+			}
+			return res
+		case map[any]any:
+			res := make(map[string]string, len(val))
+			for k, item := range val {
+				res[fmt.Sprint(k)] = stringify(item)
+			}
+			return res
+		}
+	}
+	return map[string]string{}
+}
+
+// GetStringMapStringSlice returns a map[string][]string for the key. When the
+// value cannot be converted, an empty map is returned.
+func (c *Config) GetStringMapStringSlice(key string) map[string][]string {
+	if v, ok := c.get(key); ok {
+		switch val := v.(type) {
+		case map[string][]string:
+			res := make(map[string][]string, len(val))
+			for k, item := range val {
+				copy := append([]string(nil), item...)
+				res[k] = copy
+			}
+			return res
+		case map[string]any:
+			res := make(map[string][]string, len(val))
+			for k, item := range val {
+				res[k] = toStringSlice(item)
+			}
+			return res
+		case map[any]any:
+			res := make(map[string][]string, len(val))
+			for k, item := range val {
+				res[fmt.Sprint(k)] = toStringSlice(item)
+			}
+			return res
+		}
+	}
+	return map[string][]string{}
+}
+
+// Unmarshal decodes the configuration at the provided key into the given
+// output struct. Nested maps are projected using mapstructure with weak typing.
+func (c *Config) Unmarshal(key string, out any) error {
+	if out == nil {
+		return errors.New("conf: output cannot be nil")
+	}
+	var (
+		data any
+		ok   bool
+	)
+	if key == "" {
+		data = c.values
+		ok = data != nil
+	} else {
+		data, ok = c.get(key)
+	}
+	if !ok {
+		return fmt.Errorf("conf: key %q not found", key)
+	}
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		TagName:          "mapstructure",
+		Result:           out,
+		WeaklyTypedInput: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+		),
+	})
+	if err != nil {
+		return err
+	}
+	return decoder.Decode(data)
+}
+
 func stringify(v any) string {
 	switch t := v.(type) {
 	case string:
@@ -437,5 +645,29 @@ func stringify(v any) string {
 		return t.String()
 	default:
 		return fmt.Sprintf("%v", v)
+	}
+}
+
+func toStringSlice(v any) []string {
+	switch val := v.(type) {
+	case []string:
+		return append([]string(nil), val...)
+	case []any:
+		result := make([]string, 0, len(val))
+		for _, item := range val {
+			result = append(result, stringify(item))
+		}
+		return result
+	case string:
+		if val == "" {
+			return []string{}
+		}
+		parts := strings.Split(val, ",")
+		for i, part := range parts {
+			parts[i] = strings.TrimSpace(part)
+		}
+		return parts
+	default:
+		return nil
 	}
 }
