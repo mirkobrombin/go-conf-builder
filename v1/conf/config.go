@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -90,33 +91,138 @@ func (c *Config) ReadInConfig() error {
 	if err != nil {
 		return err
 	}
-	ext := strings.ToLower(filepath.Ext(c.file))
-	switch ext {
-	case ".json":
-		err = json.Unmarshal(data, &c.values)
-	case ".yaml", ".yml":
-		err = yaml.Unmarshal(data, &c.values)
-	case ".toml":
-		_, err = toml.Decode(string(data), &c.values)
-	case ".ini":
-		cfg, e := ini.Load(data)
-		if e == nil {
-			m := cfg.Section("").KeysHash()
-			for k, v := range m {
-				c.values[k] = v
+	c.values = make(map[string]any)
+	parsed, err := c.decodeConfig(data, strings.TrimPrefix(strings.ToLower(filepath.Ext(c.file)), "."))
+	if err != nil {
+		return err
+	}
+	c.MergeConfigMap(parsed)
+	return nil
+}
+
+// ReadConfig reads configuration data from the provided reader and merges it.
+func (c *Config) ReadConfig(r io.Reader) error {
+	if c.cfgType == "" {
+		return errors.New("config type not set")
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	parsed, err := c.decodeConfig(data, c.cfgType)
+	if err != nil {
+		return err
+	}
+	c.MergeConfigMap(parsed)
+	return nil
+}
+
+// MergeConfigMap merges the provided map into the current configuration.
+func (c *Config) MergeConfigMap(data map[string]any) {
+	if data == nil {
+		return
+	}
+	normalized := normalizeLoadedMap(cloneMap(data))
+	if normalized == nil {
+		return
+	}
+	if c.values == nil {
+		c.values = normalized
+		return
+	}
+	mergeMaps(c.values, normalized)
+}
+
+func (c *Config) decodeConfig(data []byte, format string) (map[string]any, error) {
+	format = strings.ToLower(strings.TrimPrefix(format, "."))
+	var err error
+	values := make(map[string]any)
+	switch format {
+	case "json":
+		err = json.Unmarshal(data, &values)
+	case "yaml", "yml":
+		err = yaml.Unmarshal(data, &values)
+	case "toml":
+		_, err = toml.Decode(string(data), &values)
+	case "ini":
+		var cfg *ini.File
+		cfg, err = ini.Load(data)
+		if err == nil {
+			for k, v := range cfg.Section("").KeysHash() {
+				values[k] = v
 			}
 		}
-		err = e
-	case ".xml":
-		err = xml.Unmarshal(data, (*map[string]any)(&c.values))
+	case "xml":
+		err = xml.Unmarshal(data, (*map[string]any)(&values))
 	default:
 		err = errors.New("unsupported config file type")
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c.values = normalizeLoadedMap(c.values)
-	return nil
+	return normalizeLoadedMap(values), nil
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = cloneValue(v)
+	}
+	return dst
+}
+
+func cloneValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return cloneMap(val)
+	case map[any]any:
+		copied := make(map[any]any, len(val))
+		for k, item := range val {
+			copied[k] = cloneValue(item)
+		}
+		return copied
+	case []any:
+		copied := make([]any, len(val))
+		for i, item := range val {
+			copied[i] = cloneValue(item)
+		}
+		return copied
+	case []map[string]any:
+		copied := make([]any, len(val))
+		for i, item := range val {
+			copied[i] = cloneValue(item)
+		}
+		return copied
+	case []map[any]any:
+		copied := make([]any, len(val))
+		for i, item := range val {
+			copied[i] = cloneValue(item)
+		}
+		return copied
+	default:
+		return v
+	}
+}
+
+func mergeMaps(dst, src map[string]any) map[string]any {
+	if dst == nil {
+		dst = make(map[string]any)
+	}
+	for k, v := range src {
+		if existing, ok := dst[k]; ok {
+			existingMap, existingIsMap := existing.(map[string]any)
+			newMap, newIsMap := v.(map[string]any)
+			if existingIsMap && newIsMap {
+				dst[k] = mergeMaps(existingMap, newMap)
+				continue
+			}
+		}
+		dst[k] = v
+	}
+	return dst
 }
 
 func (c *Config) getEnv(key string) (string, bool) {

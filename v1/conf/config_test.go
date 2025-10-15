@@ -141,3 +141,91 @@ func TestNestedEnvOverride(t *testing.T) {
 		t.Fatalf("expected env override db-override, got %q", got)
 	}
 }
+
+func TestReadInConfigRemovesMissingKeys(t *testing.T) {
+	tmp, err := os.CreateTemp("", "cfg*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+
+	initial := "keep: 1\nremove: 2\n"
+	if err := os.WriteFile(tmp.Name(), []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := c.GetInt("keep"); got != 1 {
+		t.Fatalf("expected keep=1, got %d", got)
+	}
+	if got := c.GetInt("remove"); got != 2 {
+		t.Fatalf("expected remove=2, got %d", got)
+	}
+
+	updated := "keep: 3\n"
+	if err := os.WriteFile(tmp.Name(), []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := c.GetInt("keep"); got != 3 {
+		t.Fatalf("expected keep=3, got %d", got)
+	}
+	if _, ok := c.values["remove"]; ok {
+		t.Fatalf("expected remove key to be cleared")
+	}
+	if got := c.GetInt("remove"); got != 0 {
+		t.Fatalf("expected remove=0 after deletion, got %d", got)
+	}
+}
+
+func TestMergeSequenceWithMapsAndReaders(t *testing.T) {
+	c := New()
+	c.MergeConfigMap(map[string]any{
+		"server": map[string]any{
+			"host": "localhost",
+			"port": 8080,
+		},
+	})
+
+	c.SetConfigType("yaml")
+	reader := strings.NewReader("server:\n  port: 9000\n  ssl: true\nfeature:\n  enabled: true\n")
+	if err := c.ReadConfig(reader); err != nil {
+		t.Fatal(err)
+	}
+
+	c.MergeConfigMap(map[string]any{
+		"feature": map[string]any{
+			"name":    "beta",
+			"enabled": false,
+		},
+		"extra": "value",
+	})
+
+	if got := c.GetString("server.host"); got != "localhost" {
+		t.Fatalf("expected server.host to remain localhost, got %q", got)
+	}
+	if got := c.GetInt("server.port"); got != 9000 {
+		t.Fatalf("expected server.port=9000, got %d", got)
+	}
+	if !c.GetBool("server.ssl") {
+		t.Fatalf("expected server.ssl true")
+	}
+	if c.GetBool("feature.enabled") {
+		t.Fatalf("expected feature.enabled false after override")
+	}
+	if got := c.GetString("feature.name"); got != "beta" {
+		t.Fatalf("expected feature.name=beta, got %q", got)
+	}
+	if got := c.GetString("extra"); got != "value" {
+		t.Fatalf("expected extra=value, got %q", got)
+	}
+}
