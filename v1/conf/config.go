@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,6 +33,7 @@ type Config struct {
 	automatic   bool
 	watcher     *fsnotify.Watcher
 	onChange    func()
+	watcherDone chan struct{}
 }
 
 // New creates a new Config instance.
@@ -93,11 +95,11 @@ func (c *Config) ReadInConfig() error {
 	if err != nil {
 		return err
 	}
-	c.values = make(map[string]any)
 	parsed, err := c.decodeConfig(data, strings.TrimPrefix(strings.ToLower(filepath.Ext(c.file)), "."))
 	if err != nil {
 		return err
 	}
+	c.values = make(map[string]any)
 	c.MergeConfigMap(parsed)
 	return nil
 }
@@ -369,17 +371,52 @@ func (c *Config) WatchConfig() error {
 		return err
 	}
 	c.watcher = w
+	done := make(chan struct{})
+	c.watcherDone = done
 	go func() {
-		for ev := range w.Events {
-			if ev.Op&fsnotify.Write == fsnotify.Write {
-				c.ReadInConfig()
-				if c.onChange != nil {
-					c.onChange()
+		defer close(done)
+		for {
+			select {
+			case ev, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				if ev.Op&fsnotify.Write == fsnotify.Write {
+					if err := c.ReadInConfig(); err != nil {
+						log.Printf("conf: failed to reload config: %v", err)
+						continue
+					}
+					if c.onChange != nil {
+						c.onChange()
+					}
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				if err != nil {
+					log.Printf("conf: watcher error: %v", err)
 				}
 			}
 		}
 	}()
 	return w.Add(c.file)
+}
+
+// Close releases resources associated with the watcher and resets its state.
+func (c *Config) Close() error {
+	if c.watcher == nil {
+		return nil
+	}
+	w := c.watcher
+	done := c.watcherDone
+	c.watcher = nil
+	c.watcherDone = nil
+	err := w.Close()
+	if done != nil {
+		<-done
+	}
+	return err
 }
 
 // GetString returns a string value for the key.

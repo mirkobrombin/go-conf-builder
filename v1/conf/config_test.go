@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -185,6 +187,168 @@ func TestReadInConfigRemovesMissingKeys(t *testing.T) {
 	}
 	if got := c.GetInt("remove"); got != 0 {
 		t.Fatalf("expected remove=0 after deletion, got %d", got)
+	}
+}
+
+func TestWatchConfigSingleTrigger(t *testing.T) {
+	tmp, err := os.CreateTemp("", "cfg*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := os.WriteFile(tmp.Name(), []byte("value: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int32
+	done := make(chan struct{})
+	var once sync.Once
+	c.OnConfigChange(func() {
+		if atomic.AddInt32(&count, 1) == 1 {
+			once.Do(func() { close(done) })
+		}
+	})
+	if err := c.WatchConfig(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := os.WriteFile(tmp.Name(), []byte("value: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected watcher callback")
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if got := atomic.LoadInt32(&count); got != 1 {
+		t.Fatalf("expected single callback invocation, got %d", got)
+	}
+}
+
+func TestWatchConfigHandlesErrors(t *testing.T) {
+	tmp, err := os.CreateTemp("", "cfg*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := os.WriteFile(tmp.Name(), []byte("value: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	c.OnConfigChange(func() {
+		atomic.AddInt32(&calls, 1)
+	})
+	if err := c.WatchConfig(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := os.WriteFile(tmp.Name(), []byte("::invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if got := c.GetInt("value"); got != 1 {
+		t.Fatalf("expected previous value to remain, got %d", got)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("expected no callback on error, got %d", got)
+	}
+}
+
+func TestWatchConfigRestartAfterClose(t *testing.T) {
+	tmp, err := os.CreateTemp("", "cfg*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := os.WriteFile(tmp.Name(), []byte("value: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	var firstCount int32
+	firstDone := make(chan struct{})
+	var once sync.Once
+	c.OnConfigChange(func() {
+		if atomic.AddInt32(&firstCount, 1) == 1 {
+			once.Do(func() { close(firstDone) })
+		}
+	})
+	if err := c.WatchConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(tmp.Name(), []byte("value: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected callback before close")
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp.Name(), []byte("value: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := atomic.LoadInt32(&firstCount); got != 1 {
+		t.Fatalf("expected watcher to stop after close, got %d", got)
+	}
+
+	var restartCount int32
+	restartDone := make(chan struct{})
+	c.OnConfigChange(func() {
+		if atomic.AddInt32(&restartCount, 1) == 1 {
+			close(restartDone)
+		}
+	})
+	if err := c.WatchConfig(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := os.WriteFile(tmp.Name(), []byte("value: 4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-restartDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected callback after restart")
+	}
+
+	if got := atomic.LoadInt32(&restartCount); got != 1 {
+		t.Fatalf("expected single callback after restart, got %d", got)
+	}
+	if got := c.GetInt("value"); got != 4 {
+		t.Fatalf("expected config reload after restart, got %d", got)
 	}
 }
 
