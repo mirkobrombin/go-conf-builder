@@ -1,6 +1,7 @@
 package conf
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -349,6 +350,145 @@ func TestWatchConfigRestartAfterClose(t *testing.T) {
 	}
 	if got := c.GetInt("value"); got != 4 {
 		t.Fatalf("expected config reload after restart, got %d", got)
+	}
+}
+
+// These concurrency-focused tests should be executed with `go test -race` to
+// ensure the absence of data races while readers and writers operate
+// simultaneously.
+func TestConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	tmp, err := os.CreateTemp("", "cfg*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+
+	finalValue := 999
+	if err := os.WriteFile(tmp.Name(), []byte(fmt.Sprintf("value: %d\n", finalValue)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 25; i++ {
+			if err := os.WriteFile(tmp.Name(), []byte(fmt.Sprintf("value: %d\n", i)), 0o600); err != nil {
+				t.Errorf("write config: %v", err)
+				return
+			}
+			if err := c.ReadInConfig(); err != nil {
+				t.Errorf("reload config: %v", err)
+				return
+			}
+		}
+		if err := os.WriteFile(tmp.Name(), []byte(fmt.Sprintf("value: %d\n", finalValue)), 0o600); err != nil {
+			t.Errorf("write final config: %v", err)
+		} else if err := c.ReadInConfig(); err != nil {
+			t.Errorf("reload final config: %v", err)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 200; i++ {
+			c.SetDefault("dynamic", i)
+		}
+	}()
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 200; j++ {
+				_ = c.GetInt("value")
+				_ = c.GetString("missing")
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if got := c.GetInt("value"); got != finalValue {
+		t.Fatalf("expected final value %d, got %d", finalValue, got)
+	}
+}
+
+func TestWatchConfigConcurrentCallback(t *testing.T) {
+	t.Parallel()
+
+	tmp, err := os.CreateTemp("", "cfg*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := os.WriteFile(tmp.Name(), []byte("value: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for j := 0; j < 150; j++ {
+				_ = c.GetInt("value")
+				_ = c.GetString("value")
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	var once sync.Once
+	c.OnConfigChange(func() {
+		_ = c.GetInt("value")
+		once.Do(func() { close(done) })
+	})
+	if err := c.WatchConfig(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	close(start)
+
+	if err := os.WriteFile(tmp.Name(), []byte("value: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected watch callback")
+	}
+
+	readers.Wait()
+
+	if got := c.GetInt("value"); got != 2 {
+		t.Fatalf("expected value 2 after callback, got %d", got)
 	}
 }
 

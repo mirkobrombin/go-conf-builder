@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -22,6 +23,7 @@ import (
 
 // Config provides configuration handling similar to Viper.
 type Config struct {
+	mu          sync.RWMutex
 	defaults    map[string]any
 	values      map[string]any
 	envPrefix   string
@@ -47,31 +49,102 @@ func New() *Config {
 }
 
 // SetEnvPrefix sets a prefix for environment variables.
-func (c *Config) SetEnvPrefix(prefix string) { c.envPrefix = prefix }
+func (c *Config) SetEnvPrefix(prefix string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.envPrefix = prefix
+}
 
 // AutomaticEnv enables automatic environment variable lookup.
-func (c *Config) AutomaticEnv() { c.automatic = true }
+func (c *Config) AutomaticEnv() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.automatic = true
+}
 
 // BindEnv binds a configuration key to a specific environment variable.
-func (c *Config) BindEnv(key, env string) { c.envBindings[key] = env }
+func (c *Config) BindEnv(key, env string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.envBindings[key] = env
+}
 
 // SetDefault sets a default value for a key.
-func (c *Config) SetDefault(key string, value any) { c.defaults[key] = value }
+func (c *Config) SetDefault(key string, value any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.defaults[key] = value
+}
 
 // SetConfigName defines the base name of the config file.
-func (c *Config) SetConfigName(name string) { c.cfgName = name }
+func (c *Config) SetConfigName(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfgName = name
+}
 
 // SetConfigType sets the expected config file extension.
-func (c *Config) SetConfigType(t string) { c.cfgType = strings.ToLower(t) }
+func (c *Config) SetConfigType(t string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfgType = strings.ToLower(t)
+}
 
 // AddConfigPath adds a path to search for the config file.
-func (c *Config) AddConfigPath(path string) { c.cfgPaths = append(c.cfgPaths, path) }
+func (c *Config) AddConfigPath(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfgPaths = append(c.cfgPaths, path)
+}
 
 // SetConfigFile explicitly sets the config file path.
-func (c *Config) SetConfigFile(file string) { c.file = file }
+func (c *Config) SetConfigFile(file string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.file = file
+}
 
 // ReadInConfig reads the configuration file and merges values.
 func (c *Config) ReadInConfig() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readInConfigLocked()
+}
+
+// ReadConfig reads configuration data from the provided reader and merges it.
+func (c *Config) ReadConfig(r io.Reader) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cfgType == "" {
+		return errors.New("config type not set")
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	parsed, err := c.decodeConfig(data, c.cfgType)
+	if err != nil {
+		return err
+	}
+	c.mergeConfigMapLocked(parsed)
+	return nil
+}
+
+// MergeConfigMap merges the provided map into the current configuration.
+func (c *Config) MergeConfigMap(data map[string]any) {
+	if data == nil {
+		return
+	}
+	normalized := normalizeLoadedMap(cloneMap(data))
+	if normalized == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mergeConfigMapLocked(normalized)
+}
+
+func (c *Config) readInConfigLocked() error {
 	if c.file == "" {
 		if c.cfgName == "" {
 			return nil
@@ -100,41 +173,19 @@ func (c *Config) ReadInConfig() error {
 		return err
 	}
 	c.values = make(map[string]any)
-	c.MergeConfigMap(parsed)
+	c.mergeConfigMapLocked(parsed)
 	return nil
 }
 
-// ReadConfig reads configuration data from the provided reader and merges it.
-func (c *Config) ReadConfig(r io.Reader) error {
-	if c.cfgType == "" {
-		return errors.New("config type not set")
-	}
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return err
-	}
-	parsed, err := c.decodeConfig(data, c.cfgType)
-	if err != nil {
-		return err
-	}
-	c.MergeConfigMap(parsed)
-	return nil
-}
-
-// MergeConfigMap merges the provided map into the current configuration.
-func (c *Config) MergeConfigMap(data map[string]any) {
+func (c *Config) mergeConfigMapLocked(data map[string]any) {
 	if data == nil {
 		return
 	}
-	normalized := normalizeLoadedMap(cloneMap(data))
-	if normalized == nil {
-		return
-	}
 	if c.values == nil {
-		c.values = normalized
+		c.values = data
 		return
 	}
-	mergeMaps(c.values, normalized)
+	mergeMaps(c.values, data)
 }
 
 func (c *Config) decodeConfig(data []byte, format string) (map[string]any, error) {
@@ -356,28 +407,53 @@ func normalizeValue(value any) any {
 }
 
 // OnConfigChange sets a callback for configuration changes.
-func (c *Config) OnConfigChange(fn func()) { c.onChange = fn }
+func (c *Config) OnConfigChange(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onChange = fn
+}
 
 // WatchConfig starts watching the config file for changes.
 func (c *Config) WatchConfig() error {
+	c.mu.Lock()
 	if c.file == "" {
+		c.mu.Unlock()
 		return nil
 	}
 	if c.watcher != nil {
+		c.mu.Unlock()
 		return nil
 	}
+	file := c.file
+	c.mu.Unlock()
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
-	c.watcher = w
 	done := make(chan struct{})
+
+	c.mu.Lock()
+	if c.file == "" {
+		c.mu.Unlock()
+		w.Close()
+		return nil
+	}
+	if c.watcher != nil {
+		c.mu.Unlock()
+		w.Close()
+		return nil
+	}
+	c.watcher = w
 	c.watcherDone = done
-	go func() {
+	file = c.file
+	c.mu.Unlock()
+
+	go func(watcher *fsnotify.Watcher) {
 		defer close(done)
 		for {
 			select {
-			case ev, ok := <-w.Events:
+			case ev, ok := <-watcher.Events:
 				if !ok {
 					return
 				}
@@ -386,11 +462,14 @@ func (c *Config) WatchConfig() error {
 						log.Printf("conf: failed to reload config: %v", err)
 						continue
 					}
-					if c.onChange != nil {
-						c.onChange()
+					c.mu.RLock()
+					callback := c.onChange
+					c.mu.RUnlock()
+					if callback != nil {
+						callback()
 					}
 				}
-			case err, ok := <-w.Errors:
+			case err, ok := <-watcher.Errors:
 				if !ok {
 					return
 				}
@@ -399,19 +478,23 @@ func (c *Config) WatchConfig() error {
 				}
 			}
 		}
-	}()
-	return w.Add(c.file)
+	}(w)
+
+	return w.Add(file)
 }
 
 // Close releases resources associated with the watcher and resets its state.
 func (c *Config) Close() error {
+	c.mu.Lock()
 	if c.watcher == nil {
+		c.mu.Unlock()
 		return nil
 	}
 	w := c.watcher
 	done := c.watcherDone
 	c.watcher = nil
 	c.watcherDone = nil
+	c.mu.Unlock()
 	err := w.Close()
 	if done != nil {
 		<-done
@@ -421,6 +504,8 @@ func (c *Config) Close() error {
 
 // GetString returns a string value for the key.
 func (c *Config) GetString(key string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case string:
@@ -434,6 +519,8 @@ func (c *Config) GetString(key string) string {
 
 // GetInt returns an int value for the key.
 func (c *Config) GetInt(key string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case int:
@@ -452,6 +539,8 @@ func (c *Config) GetInt(key string) int {
 
 // GetBool returns a boolean value for the key.
 func (c *Config) GetBool(key string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case bool:
@@ -471,6 +560,8 @@ func (c *Config) GetBool(key string) bool {
 // GetFloat64 returns a float64 value for the key. When the stored value is not
 // compatible with a floating point representation, it falls back to 0.
 func (c *Config) GetFloat64(key string) float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case float64:
@@ -496,6 +587,8 @@ func (c *Config) GetFloat64(key string) float64 {
 // using time.ParseDuration, numeric values are treated as nanoseconds, and
 // incompatible values yield 0.
 func (c *Config) GetDuration(key string) time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case time.Duration:
@@ -519,6 +612,8 @@ func (c *Config) GetDuration(key string) time.Duration {
 // GetStringSlice returns a []string value for the key. Non compatible values
 // result in an empty slice.
 func (c *Config) GetStringSlice(key string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		if res := toStringSlice(v); res != nil {
 			return res
@@ -530,6 +625,8 @@ func (c *Config) GetStringSlice(key string) []string {
 // GetIntSlice returns a []int value for the key. Non convertible values result
 // in an empty slice.
 func (c *Config) GetIntSlice(key string) []int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch slice := v.(type) {
 		case []int:
@@ -563,6 +660,8 @@ func (c *Config) GetIntSlice(key string) []int {
 // GetStringMap returns a map[string]any value for the key. When the value is
 // not a compatible map, it returns an empty map.
 func (c *Config) GetStringMap(key string) map[string]any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case map[string]any:
@@ -587,6 +686,8 @@ func (c *Config) GetStringMap(key string) map[string]any {
 // GetStringMapString returns a map[string]string value for the key. On
 // incompatible types, it returns an empty map.
 func (c *Config) GetStringMapString(key string) map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case map[string]string:
@@ -615,6 +716,8 @@ func (c *Config) GetStringMapString(key string) map[string]string {
 // GetStringMapStringSlice returns a map[string][]string for the key. When the
 // value cannot be converted, an empty map is returned.
 func (c *Config) GetStringMapStringSlice(key string) map[string][]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.get(key); ok {
 		switch val := v.(type) {
 		case map[string][]string:
@@ -651,12 +754,19 @@ func (c *Config) Unmarshal(key string, out any) error {
 		data any
 		ok   bool
 	)
+	c.mu.RLock()
 	if key == "" {
-		data = c.values
-		ok = data != nil
+		if c.values != nil {
+			data = cloneMap(c.values)
+			ok = true
+		}
 	} else {
-		data, ok = c.get(key)
+		if v, exists := c.get(key); exists {
+			data = cloneValue(v)
+			ok = true
+		}
 	}
+	c.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("conf: key %q not found", key)
 	}
