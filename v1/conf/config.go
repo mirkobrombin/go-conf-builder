@@ -2,7 +2,6 @@ package conf
 
 import (
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -14,11 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/fsnotify/fsnotify"
 	"github.com/mitchellh/mapstructure"
-	ini "gopkg.in/ini.v1"
-	"gopkg.in/yaml.v3"
 )
 
 // Config provides configuration handling similar to Viper.
@@ -36,16 +32,19 @@ type Config struct {
 	watcher     *fsnotify.Watcher
 	onChange    func()
 	watcherDone chan struct{}
+	loaders     map[string]Loader
 }
 
 // New creates a new Config instance.
 func New() *Config {
-	return &Config{
+	c := &Config{
 		defaults:    make(map[string]any),
 		values:      make(map[string]any),
 		envBindings: make(map[string]string),
 		cfgPaths:    []string{"."},
 	}
+	c.loaders = defaultLoaders()
+	return c
 }
 
 // SetEnvPrefix sets a prefix for environment variables.
@@ -188,30 +187,31 @@ func (c *Config) mergeConfigMapLocked(data map[string]any) {
 	mergeMaps(c.values, data)
 }
 
+// RegisterLoader registers or replaces the loader responsible for the provided extension.
+// The extension can optionally include a leading dot and is normalized to lower case.
+func (c *Config) RegisterLoader(ext string, loader Loader) {
+	normalized := strings.ToLower(strings.TrimPrefix(ext, "."))
+	if normalized == "" || loader == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.loaders == nil {
+		c.loaders = make(map[string]Loader)
+	}
+	c.loaders[normalized] = loader
+}
+
 func (c *Config) decodeConfig(data []byte, format string) (map[string]any, error) {
 	format = strings.ToLower(strings.TrimPrefix(format, "."))
-	var err error
-	values := make(map[string]any)
-	switch format {
-	case "json":
-		err = json.Unmarshal(data, &values)
-	case "yaml", "yml":
-		err = yaml.Unmarshal(data, &values)
-	case "toml":
-		_, err = toml.Decode(string(data), &values)
-	case "ini":
-		var cfg *ini.File
-		cfg, err = ini.Load(data)
-		if err == nil {
-			for k, v := range cfg.Section("").KeysHash() {
-				values[k] = v
-			}
-		}
-	case "xml":
-		err = xml.Unmarshal(data, (*map[string]any)(&values))
-	default:
-		err = errors.New("unsupported config file type")
+	if format == "" {
+		return nil, errors.New("unsupported config file type")
 	}
+	loader, ok := c.loaders[format]
+	if !ok || loader == nil {
+		return nil, errors.New("unsupported config file type")
+	}
+	values, err := loader.Load(data)
 	if err != nil {
 		return nil, err
 	}

@@ -191,6 +191,43 @@ func TestReadInConfigRemovesMissingKeys(t *testing.T) {
 	}
 }
 
+type fakeLoader struct{}
+
+func (fakeLoader) Load(data []byte) (map[string]any, error) {
+	return map[string]any{"raw": strings.TrimSpace(string(data))}, nil
+}
+
+func TestRegisterCustomLoader(t *testing.T) {
+	tmp, err := os.CreateTemp("", "cfg*.fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := os.WriteFile(tmp.Name(), []byte("value-from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.RegisterLoader("fake", fakeLoader{})
+	c.SetConfigFile(tmp.Name())
+	if err := c.ReadInConfig(); err != nil {
+		t.Fatalf("failed to read config with custom loader: %v", err)
+	}
+
+	if got := c.GetString("raw"); got != "value-from-file" {
+		t.Fatalf("expected raw to be value-from-file, got %q", got)
+	}
+
+	c.SetConfigType("fake")
+	if err := c.ReadConfig(strings.NewReader("value-from-reader\n")); err != nil {
+		t.Fatalf("failed to read config from reader: %v", err)
+	}
+
+	if got := c.GetString("raw"); got != "value-from-reader" {
+		t.Fatalf("expected raw to be updated by reader, got %q", got)
+	}
+}
+
 func TestWatchConfigSingleTrigger(t *testing.T) {
 	tmp, err := os.CreateTemp("", "cfg*.yaml")
 	if err != nil {
