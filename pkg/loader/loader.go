@@ -78,6 +78,10 @@ func (l *Loader) Load(ctx context.Context, target any) error {
 			continue
 		}
 
+		if !fieldVal.CanSet() {
+			continue
+		}
+
 		if err := setField(fieldVal, fmt.Sprintf("%v", valueToSet)); err != nil {
 			return fmt.Errorf("failed to set field %s: %w", field.Name, err)
 		}
