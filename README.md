@@ -1,5 +1,8 @@
 # Go Conf Builder
 
+> [!CAUTION]
+> go-conf-builder is now part of the [go-foundation](https://github.com/mirkobrombin/go-foundation) framework. The v1.0.0 release mirrors go-conf-builder v2.0.1, but future versions may introduce breaking changes. Please migrate your project.
+
 A **declarative**, struct-tag based configuration loader for Go.
 
 ## Features
